@@ -1,0 +1,433 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>해야 할 일 기록</title>
+<link rel="manifest" href="manifest.json">
+<link rel="apple-touch-icon" href="apple-touch-icon.png">
+<meta name="theme-color" content="#000000">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-title" content="할 일 기록">
+<meta name="apple-mobile-web-app-status-bar-style" content="black">
+<style>
+  * { box-sizing: border-box; border-radius: 0 !important; }
+  body {
+    margin: 0;
+    font-family: -apple-system, "Noto Sans KR", sans-serif;
+    background: #fff;
+    color: #000;
+    padding: env(safe-area-inset-top) 0 env(safe-area-inset-bottom);
+  }
+  header { padding: 18px 16px; background: #000; color: #fff; border-bottom: 4px solid #000; }
+  header h1 { margin: 0; font-size: 20px; font-weight: 900; letter-spacing: 3px; }
+
+  .stats {
+    display: grid; grid-template-columns: repeat(2, 1fr);
+    gap: 0; margin: 12px 12px 0; border: 3px solid #000;
+  }
+  .stat {
+    background: #fff; padding: 10px 4px; text-align: center;
+    border: 1px solid #000;
+  }
+  .stat.wide { grid-column: span 2; background: #000; color: #fff; }
+  .stat .label { font-size: 12px; color: #555; font-weight: 700; }
+  .stat.wide .label { color: #ccc; }
+  .stat .value { font-size: 24px; font-weight: 900; margin-top: 4px; }
+  .stat .sub { font-size: 11px; color: #777; margin-top: 2px; }
+
+  .add-box { display: flex; gap: 0; padding: 12px; }
+  .add-box input {
+    flex: 1; padding: 12px; font-size: 16px; font-weight: 700;
+    border: 3px solid #000; background: #fff; color: #000; outline: none;
+  }
+  .add-box button {
+    padding: 12px 18px; font-size: 16px; font-weight: 900; border: 3px solid #000;
+    background: #000; color: #fff; letter-spacing: 2px;
+  }
+
+  .month-nav {
+    display: flex; align-items: center; justify-content: space-between;
+    margin: 0 12px 8px; border: 3px solid #000; background: #fff;
+  }
+  .month-nav button {
+    width: 56px; height: 44px; font-size: 20px; font-weight: 900; border: none;
+    background: #000; color: #fff;
+  }
+  .month-nav button:disabled { background: #ddd; color: #fff; }
+  .month-nav .month-label { font-size: 18px; font-weight: 900; letter-spacing: 1px; }
+
+  .table-wrap { overflow-x: auto; margin: 0 12px 24px; background: #fff; border: 3px solid #000; }
+  table { border-collapse: collapse; width: max-content; min-width: 100%; }
+  th, td { border: 1px solid #000; padding: 10px 6px; text-align: center; white-space: nowrap; }
+  th { background: #eee; font-size: 13px; font-weight: 900; min-width: 64px; }
+  th.today { background: #000; color: #fff; }
+  .name-col {
+    position: sticky; left: 0; background: #fff; z-index: 1;
+    text-align: left; min-width: 150px; padding-left: 10px;
+    border-right: 3px solid #000;
+  }
+  th.name-col { background: #000; color: #fff; }
+  .name-text { font-size: 15px; font-weight: 900; }
+  .task-rate {
+    display: inline-block; margin-top: 4px;
+    background: #000; color: #fff;
+    font-size: 12px; font-weight: 700;
+    padding: 3px 8px;
+  }
+  .tools { margin-top: 6px; }
+  .tools button {
+    border: 2px solid #000; background: #fff; color: #000; font-weight: 900;
+    padding: 4px 8px; font-size: 12px; margin-right: 4px;
+  }
+  .tools button:active { background: #000; color: #fff; }
+  .cell {
+    width: 48px; height: 44px; font-size: 22px; font-weight: 900;
+    border: none;
+  }
+  .cell.o { background: #000; color: #fff; }
+  .cell.x { background: #fff; color: #aaa; }
+  .none { color: #bbb; background: #f5f5f5; }
+  .empty { padding: 24px; text-align: center; color: #555; font-weight: 700; }
+
+  tr.result td { background: #fff; font-weight: 900; color: #aaa; }
+  tr.result td.name-col { background: #fff; color: #000; }
+  tr.result td.perfect-cell { background: #000; color: #fff; }
+  tr.rate td { background: #eee; font-size: 14px; font-weight: 900; }
+  tr.rate td.name-col { background: #eee; }
+  .perfect { font-size: 11px; font-weight: 900; line-height: 1.3; letter-spacing: 1px; }
+</style>
+</head>
+<body>
+
+<header><h1>해야 할 일 기록</h1></header>
+
+<div class="stats" id="stats"></div>
+
+<div class="add-box">
+  <input id="newTask" type="text" placeholder="해야 할 일 입력 (예: 운동하기)">
+  <button id="addBtn">추가</button>
+</div>
+
+<div class="month-nav">
+  <button id="prevBtn">&lt;</button>
+  <div class="month-label" id="monthLabel"></div>
+  <button id="nextBtn">&gt;</button>
+</div>
+
+<div class="table-wrap" id="tableWrap"></div>
+
+<script>
+  var KEY = "todo-tracker-v1";
+
+  function pad(n) { return String(n).padStart(2, "0"); }
+  function dateStr(d) {
+    return d.getFullYear() + "-" + pad(d.getMonth() + 1) + "-" + pad(d.getDate());
+  }
+  function esc(s) {
+    return String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+  }
+
+  function load() {
+    try {
+      var raw = localStorage.getItem(KEY);
+      if (raw) {
+        var d = JSON.parse(raw);
+        if (d && d.tasks && d.records && d.startDate) return d;
+      }
+    } catch (e) {}
+    return { startDate: dateStr(new Date()), tasks: [], records: {}, nextId: 1 };
+  }
+
+  function save() {
+    try { localStorage.setItem(KEY, JSON.stringify(data)); } catch (e) {
+      alert("저장에 실패했어요. 브라우저 저장공간을 확인해 주세요.");
+    }
+  }
+
+  var data = load();
+  save();
+
+  if (navigator.storage && navigator.storage.persist) {
+    navigator.storage.persist();
+  }
+
+  // 오프라인에서도 열리게 하는 기능 (인터넷 주소로 열었을 때만 작동)
+  if ("serviceWorker" in navigator && location.protocol.indexOf("http") === 0) {
+    window.addEventListener("load", function () {
+      navigator.serviceWorker.register("sw.js").catch(function () {});
+    });
+  }
+
+  // 지금 보고 있는 달
+  var now0 = new Date();
+  var viewYear = now0.getFullYear();
+  var viewMonth = now0.getMonth(); // 0 = 1월
+
+  // 시작일부터 오늘까지 모든 날짜 (달성률 계산용)
+  function getAllDates() {
+    var p = data.startDate.split("-");
+    var y = Number(p[0]), m = Number(p[1]) - 1, d = Number(p[2]);
+    var today = dateStr(new Date());
+    var list = [];
+    for (var i = 0; i < 4000; i++) {
+      var s = dateStr(new Date(y, m, d + i));
+      list.push(s);
+      if (s === today) break;
+    }
+    return list;
+  }
+
+  // 보고 있는 달의 모든 날짜 (1일 ~ 마지막 날)
+  function getMonthDates(y, m) {
+    var last = new Date(y, m + 1, 0).getDate();
+    var list = [];
+    for (var d = 1; d <= last; d++) {
+      list.push(dateStr(new Date(y, m, d)));
+    }
+    return list;
+  }
+
+  function startYM() {
+    var p = data.startDate.split("-");
+    return Number(p[0]) * 12 + (Number(p[1]) - 1);
+  }
+  function currentYM() {
+    var n = new Date();
+    return n.getFullYear() * 12 + n.getMonth();
+  }
+
+  // 그 날짜에 해야 하는 일 개수와 완료한 개수
+  function dayInfo(ds) {
+    var req = 0, done = 0;
+    data.tasks.forEach(function (t) {
+      if (ds >= t.created) {
+        req += 1;
+        if (data.records[ds] && data.records[ds][t.id]) done += 1;
+      }
+    });
+    return { req: req, done: done };
+  }
+
+  // 날짜 여러 개를 합친 정보 (해야 할 횟수, 완료 횟수, PERFECT DAY 횟수)
+  function sumInfo(dates) {
+    var req = 0, done = 0, perfect = 0;
+    dates.forEach(function (ds) {
+      var info = dayInfo(ds);
+      req += info.req;
+      done += info.done;
+      if (info.req > 0 && info.done === info.req) perfect += 1;
+    });
+    return { req: req, done: done, perfect: perfect };
+  }
+
+  // 할 일 하나의 달성 정보 (그 일을 만든 날부터 오늘까지)
+  function taskInfo(t, dates) {
+    var req = 0, done = 0;
+    dates.forEach(function (ds) {
+      if (ds >= t.created) {
+        req += 1;
+        if (data.records[ds] && data.records[ds][t.id]) done += 1;
+      }
+    });
+    return { req: req, done: done };
+  }
+
+  function percent(done, req) {
+    if (req === 0) return 0;
+    return Math.round(done / req * 100);
+  }
+
+  function statBox(label, info) {
+    return "<div class='stat'><div class='label'>" + label + "</div>" +
+           "<div class='value'>" + percent(info.done, info.req) + "%</div>" +
+           "<div class='sub'>" + info.done + " / " + info.req + "</div></div>";
+  }
+
+  function renderStats(allDates) {
+    var today = dateStr(new Date());
+    var monthPrefix = viewYear + "-" + pad(viewMonth + 1) + "-";
+    var yearPrefix = viewYear + "-";
+
+    var todayInfo = sumInfo([today]);
+    var monthInfo = sumInfo(allDates.filter(function (ds) { return ds.indexOf(monthPrefix) === 0; }));
+    var yearInfo = sumInfo(allDates.filter(function (ds) { return ds.indexOf(yearPrefix) === 0; }));
+    var allInfo = sumInfo(allDates);
+
+    document.getElementById("stats").innerHTML =
+      statBox("오늘 달성률", todayInfo) +
+      statBox((viewMonth + 1) + "월 달성률", monthInfo) +
+      statBox(viewYear + "년 달성률", yearInfo) +
+      statBox("지금까지의 달성률", allInfo) +
+      "<div class='stat wide'><div class='label'>PERFECT DAY (지금까지)</div><div class='value'>" + allInfo.perfect + "번</div></div>";
+  }
+
+  function renderMonthNav() {
+    document.getElementById("monthLabel").textContent = viewYear + "년 " + (viewMonth + 1) + "월";
+    var vym = viewYear * 12 + viewMonth;
+    document.getElementById("prevBtn").disabled = vym <= startYM();
+    document.getElementById("nextBtn").disabled = vym >= currentYM();
+  }
+
+  function changeMonth(diff) {
+    var d = new Date(viewYear, viewMonth + diff, 1);
+    var ym = d.getFullYear() * 12 + d.getMonth();
+    if (ym < startYM() || ym > currentYM()) return;
+    viewYear = d.getFullYear();
+    viewMonth = d.getMonth();
+    render(false);
+  }
+
+  function render(keepScroll) {
+    var wrap = document.getElementById("tableWrap");
+    var oldScroll = wrap.scrollLeft;
+    var allDates = getAllDates();
+    var dates = getMonthDates(viewYear, viewMonth);
+    var today = dateStr(new Date());
+
+    renderStats(allDates);
+    renderMonthNav();
+
+    if (data.tasks.length === 0) {
+      wrap.innerHTML = '<div class="empty">아직 해야 할 일이 없어요.<br>위에서 추가해 보세요!</div>';
+      return;
+    }
+
+    var html = "<table><thead><tr><th class='name-col'>해야 할 일</th>";
+    dates.forEach(function (ds) {
+      var p = ds.split("-");
+      var label = Number(p[1]) + "/" + Number(p[2]);
+      html += "<th class='" + (ds === today ? "today" : "") + "'>" + label + "</th>";
+    });
+    html += "</tr></thead><tbody>";
+
+    data.tasks.forEach(function (t) {
+      var ti = taskInfo(t, allDates);
+      html += "<tr><td class='name-col'>";
+      html += "<div class='name-text'>" + esc(t.name) + "</div>";
+      html += "<div class='task-rate'>달성률 " + percent(ti.done, ti.req) + "% (" + ti.done + "/" + ti.req + ")</div>";
+      html += "<div class='tools'>";
+      html += "<button data-act='edit' data-id='" + t.id + "'>수정</button>";
+      html += "<button data-act='del' data-id='" + t.id + "'>삭제</button>";
+      html += "</div></td>";
+
+      dates.forEach(function (ds) {
+        if (ds > today) {
+          html += "<td class='none'>·</td>";
+        } else if (ds < t.created) {
+          html += "<td class='none'>-</td>";
+        } else {
+          var done = data.records[ds] && data.records[ds][t.id];
+          html += "<td><button class='cell " + (done ? "o" : "x") + "' data-act='toggle' data-id='" + t.id +
+                  "' data-date='" + ds + "'>" + (done ? "O" : "X") + "</button></td>";
+        }
+      });
+      html += "</tr>";
+    });
+
+    // 결과 줄 (PERFECT DAY)
+    html += "<tr class='result'><td class='name-col'>결과</td>";
+    dates.forEach(function (ds) {
+      var info = dayInfo(ds);
+      if (ds > today || info.req === 0) {
+        html += "<td class='none'>-</td>";
+      } else if (info.done === info.req) {
+        html += "<td class='perfect-cell'><div class='perfect'>PERFECT<br>DAY</div></td>";
+      } else {
+        html += "<td>X</td>";
+      }
+    });
+    html += "</tr>";
+
+    // 날짜별 달성률 줄
+    html += "<tr class='rate'><td class='name-col'>날짜별 달성률</td>";
+    dates.forEach(function (ds) {
+      var info = dayInfo(ds);
+      if (ds > today || info.req === 0) {
+        html += "<td class='none'>-</td>";
+      } else {
+        html += "<td>" + percent(info.done, info.req) + "%</td>";
+      }
+    });
+    html += "</tr>";
+
+    html += "</tbody></table>";
+    wrap.innerHTML = html;
+
+    if (keepScroll) {
+      wrap.scrollLeft = oldScroll;
+    } else {
+      var todayTh = wrap.querySelector("th.today");
+      wrap.scrollLeft = todayTh ? Math.max(0, todayTh.offsetLeft - 170) : 0;
+    }
+  }
+
+  function addTask() {
+    var input = document.getElementById("newTask");
+    var name = input.value.trim();
+    if (!name) return;
+    data.tasks.push({ id: data.nextId, name: name, created: dateStr(new Date()) });
+    data.nextId += 1;
+    save();
+    input.value = "";
+    render(true);
+  }
+
+  document.getElementById("addBtn").addEventListener("click", addTask);
+  document.getElementById("newTask").addEventListener("keydown", function (e) {
+    if (e.key === "Enter") addTask();
+  });
+
+  document.getElementById("prevBtn").addEventListener("click", function () { changeMonth(-1); });
+  document.getElementById("nextBtn").addEventListener("click", function () { changeMonth(1); });
+
+  document.getElementById("tableWrap").addEventListener("click", function (e) {
+    var btn = e.target.closest("button");
+    if (!btn) return;
+    var act = btn.getAttribute("data-act");
+    var id = Number(btn.getAttribute("data-id"));
+
+    if (act === "toggle") {
+      var ds = btn.getAttribute("data-date");
+      if (!data.records[ds]) data.records[ds] = {};
+      if (data.records[ds][id]) {
+        delete data.records[ds][id];
+      } else {
+        data.records[ds][id] = true;
+      }
+      save();
+      render(true);
+    }
+
+    if (act === "edit") {
+      var task = data.tasks.find(function (t) { return t.id === id; });
+      var newName = prompt("새 이름을 입력하세요", task.name);
+      if (newName && newName.trim()) {
+        task.name = newName.trim();
+        save();
+        render(true);
+      }
+    }
+
+    if (act === "del") {
+      var task2 = data.tasks.find(function (t) { return t.id === id; });
+      if (confirm("'" + task2.name + "' 을(를) 삭제할까요?\n이 일의 기록도 함께 사라져요.")) {
+        data.tasks = data.tasks.filter(function (t) { return t.id !== id; });
+        Object.keys(data.records).forEach(function (ds) {
+          delete data.records[ds][id];
+        });
+        save();
+        render(true);
+      }
+    }
+  });
+
+  document.addEventListener("visibilitychange", function () {
+    if (!document.hidden) render(true);
+  });
+
+  render(false);
+</script>
+</body>
+</html>
