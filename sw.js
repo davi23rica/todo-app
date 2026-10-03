@@ -1,4 +1,4 @@
-var CACHE = "todo-cache-v1";
+var CACHE = "todo-cache-v3";
 var FILES = [
   "./",
   "./index.html",
