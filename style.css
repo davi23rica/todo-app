@@ -84,6 +84,10 @@ header h1 { margin: 0; font-size: 1.25rem; font-weight: 900; letter-spacing: 3px
   font-size: .75rem; padding: .5rem .25rem;
 }
 .hnote { margin: 0 .75rem .5rem; font-size: .75rem; font-weight: 900; letter-spacing: 1px; }
+.nudge {
+  margin: 0 .75rem .5rem; border: 3px solid var(--fg); padding: .6rem;
+  font-size: .85rem; font-weight: 900; line-height: 1.5;
+}
 .warnbox {
   margin: 0 .75rem .5rem; background: var(--ib); color: var(--if); padding: .6rem;
   font-size: .8rem; font-weight: 900; line-height: 1.7;
@@ -121,11 +125,15 @@ th.name-col { background: var(--ib); color: var(--if); }
 .cell.o { background: var(--ib); color: var(--if); }
 .cell.x { background: var(--bg); color: var(--dim); }
 .cell.fr { background: var(--soft2); color: var(--mut); font-size: 1.1rem; }
-.cell.cyc, .cell.sk {
+.cell.cyc, .cell.sk, .cell.has-amt {
   display: flex; flex-direction: column; align-items: center; justify-content: center;
   line-height: 1.1; width: 3.5rem; height: 3rem;
 }
+.cell.has-amt { height: 3.4rem; }
+.cell.cyc.has-amt { height: 3.9rem; }
+.cell.has-amt .mk { font-size: 1.1rem; }
 .cell .lab { display: block; font-size: .65rem; font-weight: 900; max-width: 3.2rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.cell .amt { display: block; font-size: .6rem; font-weight: 700; max-width: 3.3rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .cell.cyc .mk { font-size: 1.1rem; }
 .cell.sk { background: var(--hair); color: var(--fg); }
 .cell.sk .mk { font-size: .75rem; }

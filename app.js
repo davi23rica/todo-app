@@ -1,7 +1,7 @@
 /* 해야 할 일 기록 - app.js (저장 키: todo-tracker-v1, 기존 기록과 호환) */
 var KEY = "todo-tracker-v1";
 var PREF_KEY = "todo-prefs-v1";
-var APP_VERSION = "8";
+var APP_VERSION = "9";
 var DAYNAMES = ["일", "월", "화", "수", "목", "금", "토"];
 var SKIP_LIMIT = 3;
 var HIST_MAX = 200;
@@ -106,7 +106,7 @@ var prefs = loadPrefs();
 
 // ---------- 데이터 검증 / 불러오기 / 저장 ----------
 function freshData() {
-  return { ver: 2, startDate: todayS(), tasks: [], records: {}, nextId: 1, memos: {}, pin: null, honest: true, skips: {}, history: [] };
+  return { ver: 2, startDate: todayS(), tasks: [], records: {}, nextId: 1, memos: {}, pin: null, honest: true, skips: {}, history: [], amounts: {}, reviewNotes: {} };
 }
 function cleanDays(a) {
   var out = [];
@@ -169,7 +169,8 @@ function normalize(d) {
     if (typeof t.name !== "string" || !t.name.trim()) return;
     var nt = {
       id: id, name: t.name, created: isDateStr(t.created) ? t.created : out.startDate,
-      mode: "days", days: cleanDays(t.days), off: cleanOff(t.off), pinned: !!t.pinned, goals: cleanGoals(t.goals)
+      mode: "days", days: cleanDays(t.days), off: cleanOff(t.off), pinned: !!t.pinned, goals: cleanGoals(t.goals),
+      unit: typeof t.unit === "string" ? t.unit.trim().slice(0, 6) : "", avoid: !!t.avoid
     };
     var cy = t.mode === "cycle" ? cleanCycle(t.cycle) : null;
     if (cy) { nt.mode = "cycle"; nt.cycle = cy; }
@@ -189,6 +190,25 @@ function normalize(d) {
   }
   copyMap(d.records, out.records);
   copyMap(d.skips, out.skips);
+  if (d.amounts && typeof d.amounts === "object") {
+    Object.keys(d.amounts).forEach(function (ds) {
+      var r = d.amounts[ds];
+      if (!isDateStr(ds) || !r || typeof r !== "object") return;
+      Object.keys(r).forEach(function (k) {
+        var id = Number(k), v = Number(r[k]);
+        if (seen[id] && out.records[ds] && out.records[ds][id] && isFinite(v) && v >= 0 && v <= 100000) {
+          if (!out.amounts[ds]) out.amounts[ds] = {};
+          out.amounts[ds][id] = Math.round(v * 100) / 100;
+        }
+      });
+    });
+  }
+  if (d.reviewNotes && typeof d.reviewNotes === "object") {
+    Object.keys(d.reviewNotes).forEach(function (ws) {
+      var n = d.reviewNotes[ws];
+      if (isDateStr(ws) && typeof n === "string" && n.trim()) out.reviewNotes[ws] = n.slice(0, 500);
+    });
+  }
   if (d.memos && typeof d.memos === "object") {
     Object.keys(d.memos).forEach(function (ds) {
       if (isDateStr(ds) && typeof d.memos[ds] === "string" && d.memos[ds]) out.memos[ds] = d.memos[ds];
@@ -442,11 +462,16 @@ function logH(type, label, undo) {
   if (data.history.length > HIST_MAX) data.history.splice(0, data.history.length - HIST_MAX);
 }
 function taskSnap(t) {
-  return clone({ name: t.name, mode: t.mode, days: t.days, cycle: t.cycle || null, goals: t.goals || [], pinned: !!t.pinned });
+  return clone({ name: t.name, mode: t.mode, days: t.days, cycle: t.cycle || null, goals: t.goals || [], pinned: !!t.pinned, unit: t.unit || "", avoid: !!t.avoid });
 }
 function applySnap(t, s) {
   t.name = s.name; t.mode = s.mode; t.days = s.days; t.goals = s.goals; t.pinned = !!s.pinned;
   if (s.cycle) t.cycle = s.cycle; else delete t.cycle;
+  if ("unit" in s) t.unit = s.unit || "";
+  if ("avoid" in s) t.avoid = !!s.avoid;
+}
+function snapMatch(cur, snap) {
+  return Object.keys(snap).every(function (k) { return same(cur[k], snap[k]); });
 }
 function ordIds() { return data.tasks.map(function (t) { return t.id; }); }
 function same(a, b) { return JSON.stringify(a) === JSON.stringify(b); }
@@ -465,7 +490,13 @@ function undoEntry(e) {
         if (!taskById(u.id)) return "그 할 일이 지금은 없어요.";
         if (!canEdit(u.ds)) return HON;
         if (isDone(u.id, u.ds) !== u.to) return CONF;
+        if ("toAmt" in u && getAmt(u.id, u.ds) !== u.toAmt) return CONF;
         setRec(u.id, u.ds, u.from);
+        if ("fromAmt" in u) setAmt(u.id, u.ds, u.fromAmt);
+        break;
+      case "rnote":
+        if ((data.reviewNotes[u.ws] || "") !== u.to) return CONF;
+        if (u.from) data.reviewNotes[u.ws] = u.from; else delete data.reviewNotes[u.ws];
         break;
       case "skip":
         if (!taskById(u.id)) return "그 할 일이 지금은 없어요.";
@@ -488,7 +519,7 @@ function undoEntry(e) {
       case "edit":
         t = taskById(u.id);
         if (!t) return "그 할 일이 지금은 없어요.";
-        if (!same(taskSnap(t), u.after)) return CONF;
+        if (!snapMatch(taskSnap(t), u.after)) return CONF;
         applySnap(t, clone(u.before));
         break;
       case "arc":
@@ -511,6 +542,10 @@ function undoEntry(e) {
         data.tasks.splice(idx, 0, nt.tasks[0]);
         Object.keys(u.records || {}).forEach(function (d) { if (isDateStr(d)) setRec(u.task.id, d, true); });
         Object.keys(u.skips || {}).forEach(function (d) { if (isDateStr(d)) setSkip(u.task.id, d, true); });
+        Object.keys(u.amts || {}).forEach(function (d) {
+          var v = Number(u.amts[d]);
+          if (isDateStr(d) && isFinite(v) && v >= 0) setAmt(u.task.id, d, Math.round(v * 100) / 100);
+        });
         if (u.task.id >= data.nextId) data.nextId = u.task.id + 1;
         break;
       default:
@@ -539,14 +574,100 @@ function doUndo(h) {
 }
 
 // ---------- 데이터를 바꾸는 동작 (모두 내역에 기록) ----------
+function getAmt(id, ds) {
+  var m = data.amounts[ds];
+  return (m && m[id] !== undefined) ? m[id] : null;
+}
+function setAmt(id, ds, v) {
+  if (v === null || v === undefined) {
+    if (data.amounts[ds]) { delete data.amounts[ds][id]; if (!Object.keys(data.amounts[ds]).length) delete data.amounts[ds]; }
+  } else {
+    if (!data.amounts[ds]) data.amounts[ds] = {};
+    data.amounts[ds][id] = v;
+  }
+}
+function fmtAmt(v, t) { return String(v) + (t && t.unit ? t.unit : ""); }
+function stateWord(t, done, amt) {
+  if (!done) return t.avoid ? "못 참음" : "X";
+  return (t.avoid ? "참음" : "O") + (amt !== null ? " " + fmtAmt(amt, t) : "");
+}
+// 체크 상태(+기록량)를 바꾸고 내역에 남겨요. 바뀐 게 있으면 true
+function applyRec(id, ds, done, amt) {
+  var t = taskById(id);
+  if (!t) return false;
+  var fd = isDone(id, ds), fa = getAmt(id, ds), ta = done ? amt : null;
+  if (fd === done && fa === ta) return false;
+  setRec(id, ds, done);
+  setAmt(id, ds, ta);
+  logH("체크", t.name + " (" + fmtDate(ds) + ") " + stateWord(t, fd, fa) + " → " + stateWord(t, done, ta),
+       { k: "rec", id: id, ds: ds, from: fd, to: done, fromAmt: fa, toAmt: ta });
+  save();
+  return true;
+}
 function toggleRec(id, ds) {
+  if (applyRec(id, ds, !isDone(id, ds), null)) render(true);
+}
+function changeRevNote(ws, text) {
+  var from = data.reviewNotes[ws] || "";
+  if (from === text) return;
+  if (text) data.reviewNotes[ws] = text; else delete data.reviewNotes[ws];
+  logH("소감", fmtDate(ws) + " 주 소감 " + (!from ? "추가" : (text ? "수정" : "삭제")), { k: "rnote", ws: ws, from: from, to: text });
+  save();
+}
+function lastAmount(id) {
+  var best = null, bd = "";
+  Object.keys(data.amounts).forEach(function (ds) {
+    var v = data.amounts[ds][id];
+    if (v !== undefined && ds > bd) { bd = ds; best = v; }
+  });
+  return best;
+}
+function amtList(t) {
+  var out = [];
+  Object.keys(data.amounts).forEach(function (ds) {
+    var v = data.amounts[ds][t.id];
+    if (v !== undefined && isDone(t.id, ds)) out.push({ ds: ds, v: v });
+  });
+  out.sort(function (a, b) { return a.ds < b.ds ? -1 : 1; });
+  return out;
+}
+function amtSum(list, a, b) {
+  var s = 0, n = 0;
+  list.forEach(function (x) { if (x.ds >= a && x.ds <= b) { s += x.v; n += 1; } });
+  return { sum: Math.round(s * 100) / 100, n: n };
+}
+function amtDiff(c, p, t) {
+  if (!c.n || !p.n) return "비교 불가";
+  var d = Math.round((c.sum - p.sum) * 100) / 100;
+  var rel = p.sum > 0 ? Math.round((c.sum - p.sum) / p.sum * 100) : null;
+  return (d > 0 ? "+" : "") + fmtAmt(d, t) + (rel !== null ? " (" + (rel > 0 ? "+" : "") + rel + "%)" : "");
+}
+function openAmount(id, ds) {
   var t = taskById(id);
   if (!t) return;
-  var from = isDone(id, ds);
-  setRec(id, ds, !from);
-  logH("체크", t.name + " (" + fmtDate(ds) + ") " + (from ? "O → X" : "X → O"), { k: "rec", id: id, ds: ds, from: from, to: !from });
-  save();
-  render(true);
+  var done = isDone(id, ds), cur = getAmt(id, ds), pre = cur !== null ? cur : lastAmount(id);
+  openPanel("<h2>" + esc(t.name) + "</h2><div class='note'>" + esc(fmtDate(ds, true)) + " / 지금은 " + esc(stateWord(t, done, cur)) + "</div>" +
+    "<label class='label-s' for='amtIn'>" + (t.avoid ? "기록" : "한 양") + " (" + esc(t.unit) + ")</label>" +
+    "<input type='number' id='amtIn' min='0' step='any' inputmode='decimal' value='" + (pre !== null ? pre : "") + "'>" +
+    "<div class='note'>양을 비우고 저장하면 " + (t.avoid ? "참음" : "O") + "만 기록해요. 숫자는 100000 이하로 적어 주세요.</div>" +
+    "<button class='btn' id='amtSave'>" + (t.avoid ? "참았어 (O)로 저장" : "O로 저장") + "</button>" +
+    (done ? "<button class='btn light' id='amtX'>" + (t.avoid ? "못 참음 (X)으로 바꾸기" : "X로 바꾸기") + "</button>" : "") +
+    "<button class='btn light' id='amtClose'>닫기</button>");
+  document.getElementById("amtSave").addEventListener("click", function () {
+    var raw = document.getElementById("amtIn").value.trim(), amt = null;
+    if (raw !== "") {
+      var v = Number(raw);
+      if (!isFinite(v) || v < 0 || v > 100000) { alert("양은 0 이상 100000 이하 숫자로 적어 주세요."); return; }
+      amt = Math.round(v * 100) / 100;
+    }
+    applyRec(id, ds, true, amt);
+    closePanel();
+    toast("저장했어요");
+    render(true);
+  });
+  var ax = document.getElementById("amtX");
+  if (ax) ax.addEventListener("click", function () { applyRec(id, ds, false, null); closePanel(); render(true); });
+  document.getElementById("amtClose").addEventListener("click", closePanel);
 }
 function changeSkip(id, ds, val) {
   var t = taskById(id);
@@ -565,7 +686,7 @@ function changeMemo(ds, text) {
   render(true);
 }
 function addTask(name) {
-  var t = { id: data.nextId, name: name, created: todayS(), mode: "days", days: [0, 1, 2, 3, 4, 5, 6], off: [], pinned: false, goals: [] };
+  var t = { id: data.nextId, name: name, created: todayS(), mode: "days", days: [0, 1, 2, 3, 4, 5, 6], off: [], pinned: false, goals: [], unit: "", avoid: false };
   data.nextId += 1;
   data.tasks.push(t);
   logH("추가", "할 일 추가 : " + name, { k: "add", id: t.id });
@@ -584,14 +705,16 @@ function deleteTask(id) {
   var t = taskById(id);
   if (!t) return false;
   if (!confirm("'" + t.name + "' 을(를) 삭제할까요?\n이 일의 기록도 함께 사라져요.\n(실수하면 내역 탭에서 되돌릴 수 있어요)")) return false;
-  var recs = {}, sk = {};
+  var recs = {}, sk = {}, am = {};
+  Object.keys(data.amounts).forEach(function (d) { if (data.amounts[d][id] !== undefined) am[d] = data.amounts[d][id]; });
   Object.keys(data.records).forEach(function (d) { if (data.records[d][id]) recs[d] = true; });
   Object.keys(data.skips).forEach(function (d) { if (data.skips[d][id]) sk[d] = true; });
   var index = data.tasks.indexOf(t);
-  logH("삭제", "할 일 삭제 : " + t.name, { k: "del", task: clone(t), index: index, records: recs, skips: sk });
+  logH("삭제", "할 일 삭제 : " + t.name, { k: "del", task: clone(t), index: index, records: recs, skips: sk, amts: am });
   data.tasks = data.tasks.filter(function (x) { return x.id !== id; });
   Object.keys(recs).forEach(function (d) { setRec(id, d, false); });
   Object.keys(sk).forEach(function (d) { setSkip(id, d, false); });
+  Object.keys(am).forEach(function (d) { setAmt(id, d, null); });
   save();
   return true;
 }
@@ -711,11 +834,22 @@ function renderWarn() {
     var cs = cellState(t, today);
     if (cs.s === "work" && isDone(t.id, today)) return;
     var m = missStreak(t);
-    if (m >= 2) msgs.push("[경고] " + esc(t.name) + " : " + m + "일 연속 X." + (cs.s === "work" ? " 오늘 O로 끊어!" : ""));
-    else if (m === 1 && cs.s === "work") msgs.push("[주의] " + esc(t.name) + " : 어제 X. 오늘도 빼먹으면 2일 연속!");
+    if (m >= 2) msgs.push("[경고] " + esc(t.name) + " : " + m + "일 연속 " + (t.avoid ? "못 참음." : "X.") + (cs.s === "work" ? (t.avoid ? " 오늘은 참아!" : " 오늘 O로 끊어!") : ""));
+    else if (m === 1 && cs.s === "work") msgs.push("[주의] " + esc(t.name) + " : 어제 " + (t.avoid ? "못 참음. 오늘도 못 참으면 2일 연속!" : "X. 오늘도 빼먹으면 2일 연속!"));
   });
   el.innerHTML = msgs.join("<br>");
   el.hidden = msgs.length === 0;
+}
+function renderNudge(all) {
+  var el = document.getElementById("nudge"), today = todayS(), i = dayInfo(today);
+  if (!(i.req > 0 && i.req - i.done === 1)) { el.hidden = true; return; }
+  var left = null;
+  data.tasks.forEach(function (t) { if (!isArchived(t) && cellState(t, today).s === "work" && !isDone(t.id, today)) left = t; });
+  if (!left) { el.hidden = true; return; }
+  var st = streakInfo(all);
+  el.textContent = "하나만 더! " + left.name + (left.avoid ? "을(를) 끝까지 참으면" : "만 하면") + " 오늘 PERFECT DAY야." +
+    (st.cur > 0 ? " 연속 기록은 " + (st.cur + 1) + "일이 돼." : "");
+  el.hidden = false;
 }
 function renderUndoBar() {
   var el = document.getElementById("undoBar"), h = lastUndoable();
@@ -748,18 +882,21 @@ function cellHtml(t, ds, cs) {
     return { c: "", h: "<button class='cell sk' data-act='" + (ok ? "unskip" : "locked") + "' " + a + " aria-label='스킵한 날'>" +
       (cs.label ? "<span class='lab'>" + esc(cs.label) + "</span>" : "") + "<span class='mk'>스킵</span></button>" };
   }
+  var am = done ? getAmt(t.id, ds) : null;
+  var at = am !== null ? "<span class='amt'>" + esc(fmtAmt(am, t)) + "</span>" : "";
   if (cs.s === "free") {
-    return { c: "", h: "<button class='cell " + (done ? "o" : "fr") + "' data-act='" + act + "' " + a + "><span class='mk'>" + (done ? "O" : "+") + "</span></button>" };
+    return { c: "", h: "<button class='cell " + (done ? "o" : "fr") + (at ? " has-amt" : "") + "' data-act='" + act + "' " + a + "><span class='mk'>" + (done ? "O" : "+") + "</span>" + at + "</button>" };
   }
   var cyc = !!cs.label;
-  return { c: "", h: "<button class='cell " + (done ? "o" : "x") + (cyc ? " cyc" : "") + "' data-act='" + act + "' " + a + ">" +
-    (cyc ? "<span class='lab'>" + esc(cs.label) + "</span>" : "") + "<span class='mk'>" + (done ? "O" : "X") + "</span></button>" };
+  return { c: "", h: "<button class='cell " + (done ? "o" : "x") + (cyc ? " cyc" : "") + (at ? " has-amt" : "") + "' data-act='" + act + "' " + a +
+    (t.avoid ? " aria-label='참았으면 O'" : "") + ">" +
+    (cyc ? "<span class='lab'>" + esc(cs.label) + "</span>" : "") + "<span class='mk'>" + (done ? "O" : "X") + "</span>" + at + "</button>" };
 }
 function nameCellHtml(t, active, all, today) {
   var ti = taskInfo(t, all), gs = goalSummary(t), cs = cellState(t, today);
   var group = active.filter(function (x) { return !!x.pinned === !!t.pinned; }), gi = group.indexOf(t);
-  var h = "<div class='name-text'>" + esc(t.name) + (t.pinned ? "<span class='pin-tag'>고정</span>" : "") + "</div>";
-  h += "<div class='days-text'>" + esc(daysLabel(t)) + "</div>";
+  var h = "<div class='name-text'>" + esc(t.name) + (t.pinned ? "<span class='pin-tag'>고정</span>" : "") + (t.avoid ? "<span class='pin-tag'>하지 않기</span>" : "") + "</div>";
+  h += "<div class='days-text'>" + esc(daysLabel(t)) + (t.unit ? " / 단위 " + esc(t.unit) : "") + "</div>";
   if (isCycle(t)) {
     var tl = cs.s === "work" ? cs.label : (cs.s === "rest" ? "쉼" : (cs.s === "skip" ? "스킵" : "-"));
     h += "<div class='days-text'>오늘 차례 : " + esc(tl) + ((cs.s === "work" && isDone(t.id, today)) ? " (완료)" : "") + "</div>";
@@ -772,6 +909,10 @@ function nameCellHtml(t, active, all, today) {
            gs.cur.done + "/" + gs.cur.target + (gs.cur.achieved ? " 달성" : "") + "</span>";
     }
     if (gs.fin.length) h += "<span class='goal-chip'>목표 달성 " + gs.ach + "/" + gs.fin.length + "기간 (" + percent(gs.ach, gs.fin.length) + "%)</span>";
+  }
+  if (t.unit) {
+    var wk0 = weekStart(today), ws0 = amtSum(amtList(t), wk0, addDays(wk0, 6));
+    if (ws0.n) h += "<span class='goal-chip'>이번 주 합계 " + esc(fmtAmt(ws0.sum, t)) + "</span>";
   }
   h += "</div><div class='tools'>" +
     "<button data-act='edit' data-id='" + t.id + "'>수정</button>" +
@@ -789,6 +930,7 @@ function renderHome(keep) {
   renderStatCards(all);
   renderMonthNav();
   renderWarn();
+  renderNudge(all);
   renderUndoBar();
   document.getElementById("honestNote").textContent = data.honest ? "정직 모드 ON : 오늘과 어제만 체크할 수 있어요" : "";
   document.getElementById("viewBtn").textContent = "보기 : " + (prefs.view === "cards" ? "날짜별 카드" : "표");
@@ -1009,6 +1151,32 @@ function goalHtml(ft) {
   });
   return h + "</div>";
 }
+function amountHtml(cr, ft) {
+  var list = ft.filter(function (t) { return t.unit; });
+  var h = "<div class='chart'><div class='chart-title'>기록량</div>";
+  if (!list.length) return h + "<div class='note'>기록 단위(분, 쪽, 세트 등)를 정한 할 일이 없어요. 할 일의 '수정'에서 정할 수 있어요.</div></div>";
+  var pr = cr ? prevRange(cr) : null;
+  list.forEach(function (t) {
+    var L = amtList(t);
+    h += "<div class='arc'><div class='name-text'>" + esc(t.name) + (t.avoid ? " (하지 않기)" : "") + "</div>";
+    if (!L.length) { h += "<div class='note'>아직 기록한 양이 없어요.</div></div>"; return; }
+    var tot = amtSum(L, "0000-00-00", "9999-99-99");
+    var best = L.reduce(function (a, b) { return b.v > a.v ? b : a; });
+    if (cr) {
+      var c = amtSum(L, cr.from, cr.to), p = amtSum(L, pr.from, pr.to);
+      h += "<table class='tbl'><tr><th></th><th>이전 기간</th><th>최근 기간</th><th>변화</th></tr>" +
+        "<tr><td class='l'>합계</td><td>" + (p.n ? esc(fmtAmt(p.sum, t)) : "기록 없음") + "</td><td>" + (c.n ? esc(fmtAmt(c.sum, t)) : "기록 없음") + "</td><td>" + esc(amtDiff(c, p, t)) + "</td></tr>" +
+        "<tr><td class='l'>기록한 날</td><td>" + p.n + "일</td><td>" + c.n + "일</td><td></td></tr></table>";
+    }
+    h += "<div class='note'>전체 합계 " + esc(fmtAmt(tot.sum, t)) + " (" + tot.n + "번) / 평균 " + esc(fmtAmt(Math.round(tot.sum / tot.n * 100) / 100, t)) +
+         " / 최고 " + esc(fmtAmt(best.v, t)) + " (" + esc(fmtDate(best.ds)) + ")</div>";
+    var last = L.slice(-14), mx = Math.max.apply(null, last.map(function (x) { return x.v; })) || 1;
+    h += "<div class='ucols'>" + last.map(function (x) {
+      return "<div class='ucol'><div class='uval'>" + x.v + "</div><div class='ubar-wrap'><div class='ubar' style='height:" + Math.max(Math.round(x.v / mx * 100), 2) + "%'></div></div><div class='ulab'>" + esc(shortD(x.ds)) + "</div></div>";
+    }).join("") + "</div><div class='note'>최근 14번 기록이에요</div></div>";
+  });
+  return h + "<div class='note'>괄호 안 %는 이전 기간보다 늘거나 줄어든 비율이에요. 달성률의 %p(퍼센트포인트)와는 달라요.</div></div>";
+}
 function heatHtml(ft) {
   var n = new Date(), todayS2 = dateStr(n), idx = (n.getDay() + 6) % 7, WEEKS = 20;
   var d0 = n.getDate() - idx - 7 * (WEEKS - 1), cells = "";
@@ -1080,7 +1248,7 @@ function renderStatsTab() {
   } else if (!data.tasks.length) {
     h += "<div class='chart'><div class='note'>아직 할 일이 없어요. 기록 탭에서 할 일을 추가해 보세요.</div></div>";
   } else {
-    h += compareHtml(cr, ft) + unitChartHtml(cr, ft) + weekdayHtml(cr, ft) + taskCompareHtml(cr, ft) + goalHtml(ft);
+    h += compareHtml(cr, ft) + unitChartHtml(cr, ft) + weekdayHtml(cr, ft) + taskCompareHtml(cr, ft) + goalHtml(ft) + amountHtml(cr, ft);
   }
   h += heatHtml(ft) + weakHtml(ft, all) + monthChartHtml(ft, all);
   el.innerHTML = h;
@@ -1153,7 +1321,7 @@ function buildReview(ws) {
   var tl = [];
   data.tasks.forEach(function (t) {
     var i = taskInfo(t, dates), p = taskInfo(t, pdates);
-    if (i.req > 0) tl.push({ name: t.name, req: i.req, done: i.done, rate: percent(i.done, i.req), prate: p.req ? percent(p.done, p.req) : null });
+    if (i.req > 0) tl.push({ name: t.name, req: i.req, done: i.done, rate: percent(i.done, i.req), prate: p.req ? percent(p.done, p.req) : null, avoid: !!t.avoid });
   });
   var s2 = [];
   if (!tl.length) s2.push("이 주에 매일/요일/순환으로 기록된 할 일이 없어서 데이터가 부족해.");
@@ -1164,7 +1332,7 @@ function buildReview(ws) {
     if (best.rate === worst.rate) s2.push("모든 할 일의 달성률이 " + best.rate + "%로 같아.");
     else {
       s2.push("가장 잘 지킨 할 일은 " + best.name + " (" + best.rate + "%, " + best.done + "/" + best.req + ")이야.");
-      s2.push("가장 자주 놓친 할 일은 " + worst.name + " (" + worst.rate + "%, " + (worst.req - worst.done) + "번 놓침)이야.");
+      s2.push("가장 자주 " + (worst.avoid ? "못 참은" : "놓친") + " 할 일은 " + worst.name + " (" + worst.rate + "%, " + (worst.req - worst.done) + (worst.avoid ? "번 못 참음" : "번 놓침") + ")이야.");
     }
     var drop = null, rise = null;
     tl.forEach(function (x) {
@@ -1218,6 +1386,21 @@ function buildReview(ws) {
   });
   if (s4.length) sec.push({ title: "목표", items: s4 });
 
+  // 기록량
+  var s5 = [];
+  data.tasks.forEach(function (t) {
+    if (!t.unit) return;
+    var L = amtList(t), c = amtSum(L, ws, end), p = amtSum(L, pws, addDays(pws, 6));
+    if (!c.n) return;
+    var line = t.name + " : 이번 주 " + fmtAmt(c.sum, t) + " (" + c.n + "번 기록)";
+    if (p.n) {
+      var d = Math.round((c.sum - p.sum) * 100) / 100;
+      line += ", 지난주 " + fmtAmt(p.sum, t) + "보다 " + (d > 0 ? "+" : "") + fmtAmt(d, t);
+    } else line += ", 지난주 기록은 없어";
+    s5.push(line);
+  });
+  if (s5.length) sec.push({ title: "기록량", items: s5 });
+
   // 다음 주 제안
   if (cur.req === 0) sug.push("먼저 할 일을 추가하고 며칠 기록해 보자.");
   if (cRate !== null && pRate !== null && cRate - pRate <= -10) sug.push("달성률이 많이 내려갔어. 지난주와 무엇이 달랐는지 먼저 떠올려 보자.");
@@ -1234,7 +1417,7 @@ function buildReview(ws) {
   if (cRate !== null && cRate >= 90 && !inProg) sug.push("거의 다 지켰어. 이대로 유지하거나 목표를 조금 올려 봐도 좋아.");
   if (!sug.length) sug.push(cur.req === 0 ? "기록이 쌓이면 더 구체적인 제안을 해 줄게." : "특별히 걸리는 점이 없어. 지금 방식을 유지하자.");
   sec.push({ title: "다음 주에 해볼 것", items: sug.slice(0, 3) });
-  return { ws: ws, we: we, inProg: inProg, sections: sec };
+  return { ws: ws, we: we, inProg: inProg, sections: sec, note: data.reviewNotes[ws] || "" };
 }
 function reviewText(R) {
   var t = "주간 리뷰 (" + fmtDate(R.ws) + " ~ " + fmtDate(R.we) + ")" + (R.inProg ? " - 진행 중" : "") + "\n";
@@ -1242,6 +1425,7 @@ function reviewText(R) {
     t += "\n[" + s.title + "]\n";
     s.items.forEach(function (i) { t += "- " + i + "\n"; });
   });
+  if (R.note) t += "\n[내 소감]\n- " + R.note + "\n";
   return t;
 }
 function renderReviewTab() {
@@ -1256,6 +1440,8 @@ function renderReviewTab() {
     s.items.forEach(function (i) { h += "<p>" + esc(i) + "</p>"; });
     h += "</div>";
   });
+  h += "<div class='rev-sec'><h3>내 소감</h3><label class='sr' for='rvNote'>이 주 소감</label><textarea id='rvNote' maxlength='300' placeholder='이 주를 한두 줄로 적어 보자'>" + esc(R.note) + "</textarea>" +
+       "<button class='btn small' data-rv='note'>소감 저장</button></div>";
   h += "<div class='row'><button class='btn light' data-rv='copy'>텍스트 복사</button><button class='btn light' data-rv='save'>파일로 저장</button></div>";
   if (revWeek !== curWs) h += "<button class='btn small light' data-rv='now'>이번 주로 돌아가기</button>";
   h += "<div class='note'>월요일부터 일요일까지가 한 주예요. 스킵한 날과 보관한 할 일은 기존 통계와 같은 기준으로 계산해요.</div>";
@@ -1268,6 +1454,7 @@ function onReviewClick(e) {
   if (a === "prev") revWeek = addDays(revWeek, -7);
   else if (a === "next") revWeek = addDays(revWeek, 7);
   else if (a === "now") revWeek = weekStart(todayS());
+  else if (a === "note") { changeRevNote(revWeek, document.getElementById("rvNote").value.trim().slice(0, 300)); toast("소감을 저장했어요"); }
   else if (a === "copy") { copyText(reviewText(buildReview(revWeek)), "리뷰를 복사했어요"); return; }
   else if (a === "save") { downloadText("weekly-review-" + revWeek + ".txt", reviewText(buildReview(revWeek))); toast("파일로 저장했어요"); return; }
   renderReviewTab();
@@ -1492,7 +1679,7 @@ function openEdit(id) {
   var namesVal = cyc ? t.cycle.names.join(", ") : "A, B, C";
   var ig = goalOn(t, today);
   var g0 = ig ? { type: ig.type, count: ig.count, from: ig.from, to: ig.to || "" } : { type: "daily", count: 3, from: today, to: "" };
-  var gType = g0.type, pinned = !!t.pinned;
+  var gType = g0.type, pinned = !!t.pinned, avoid = !!t.avoid;
   var dayHtml = "", restHtml = "";
   for (var i = 0; i < 7; i++) dayHtml += "<button data-d='" + i + "' class='" + (sel.indexOf(i) !== -1 ? "on" : "") + "'>" + DAYNAMES[i] + "</button>";
   for (var r = 1; r <= 3; r++) restHtml += "<button data-r='" + r + "' class='" + (r === rest ? "on" : "") + "'>" + r + "일</button>";
@@ -1500,6 +1687,9 @@ function openEdit(id) {
   openPanel(
     "<h2>할 일 수정</h2>" +
     "<label class='label-s' for='editName'>이름</label><input type='text' id='editName' value=\"" + esc(t.name) + "\">" +
+    "<label class='label-s' for='editUnit'>기록 단위 (비우면 O/X만, 예: 분, 쪽, 세트)</label><input type='text' id='editUnit' maxlength='6' value=\"" + esc(t.unit || "") + "\">" +
+    "<span class='label-s'>하지 않기 습관</span><button class='btn light small' id='avoidBtn'></button>" +
+    "<div class='note'>켜면 안 하는 걸 지키는 일이에요. 참았으면 O, 못 참았으면 X로 기록해요. (예: 게임 안 하기)</div>" +
     "<span class='label-s'>방식</span><div class='seg' id='modeBtns'><button data-m='days'>매일 / 요일 지정</button><button data-m='cycle'>순환 (A→B→C→쉼)</button></div>" +
     "<div id='daysBox'><span class='label-s'>해야 하는 요일 (눌러서 켜고 끄기)</span><div class='seg' id='dayBtns'>" + dayHtml + "</div></div>" +
     "<div id='cycleBox'><label class='label-s' for='cycNames'>순환 이름 (쉼표로 구분, 2~6개)</label><input type='text' id='cycNames' value=\"" + esc(namesVal) + "\">" +
@@ -1528,6 +1718,7 @@ function openEdit(id) {
     var gb = document.querySelectorAll("#goalBox [data-gt]");
     for (var q = 0; q < gb.length; q++) gb[q].className = gb[q].getAttribute("data-gt") === gType ? "on" : "";
     document.getElementById("pinBtn").textContent = "상단 고정 : " + (pinned ? "켜짐" : "꺼짐");
+    document.getElementById("avoidBtn").textContent = "하지 않기 : " + (avoid ? "켜짐" : "꺼짐");
   }
   sync();
   document.getElementById("modeBtns").addEventListener("click", function (e) { var b = e.target.closest("button"); if (b) { mode = b.getAttribute("data-m"); sync(); } });
@@ -1540,6 +1731,7 @@ function openEdit(id) {
     sync();
   });
   document.getElementById("pinBtn").addEventListener("click", function () { pinned = !pinned; sync(); });
+  document.getElementById("avoidBtn").addEventListener("click", function () { avoid = !avoid; sync(); });
   document.getElementById("dayBtns").addEventListener("click", function (e) {
     var b = e.target.closest("button");
     if (!b) return;
@@ -1580,9 +1772,12 @@ function openEdit(id) {
       if (arr.length < 2 || arr.length > 6) { alert("순환 이름은 2개~6개로 입력해 주세요. (예: A, B, C)"); return; }
       newCycle = { names: arr, rest: rest };
     }
+    var unit = document.getElementById("editUnit").value.trim().slice(0, 6);
     changeTask(t, function () {
       t.name = name;
       t.pinned = pinned;
+      t.unit = unit;
+      t.avoid = avoid;
       if (mode === "days") {
         t.mode = "days";
         t.days = newDays;
@@ -1705,7 +1900,8 @@ document.getElementById("tableWrap").addEventListener("click", function (e) {
   if (act === "locked") { alert("정직 모드: 오늘과 어제만 바꿀 수 있어요."); return; }
   if (act === "toggle") {
     if (!canEdit(ds)) { alert("정직 모드: 오늘과 어제만 바꿀 수 있어요."); return; }
-    toggleRec(id, ds);
+    var tt = taskById(id);
+    if (tt && tt.unit) openAmount(id, ds); else toggleRec(id, ds);
   } else if (act === "unskip") {
     if (!canEdit(ds)) { alert("정직 모드: 오늘과 어제만 바꿀 수 있어요."); return; }
     if (confirm("이 날의 스킵을 취소할까요?")) { changeSkip(id, ds, false); render(true); }
@@ -1755,4 +1951,4 @@ if (loadNotice) {
   nt.hidden = false;
 }
 showTab(prefs.startTab);
-showLock(); 
+showLock();
